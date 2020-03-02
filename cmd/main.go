@@ -1,50 +1,73 @@
 package main
 
 import (
-	"errors"
+	"context"
 	"fmt"
-	"log"
+	"github.com/sirupsen/logrus"
+	"io"
 	"os"
+	"time"
 
-	"github.com/eminetto/clean-architecture-go/config"
-	"github.com/eminetto/clean-architecture-go/pkg/bookmark"
-	"github.com/eminetto/clean-architecture-go/pkg/entity"
-	"github.com/juju/mgosession"
-	mgo "gopkg.in/mgo.v2"
+	_ "../migrations"
+	migrate "github.com/xakep666/mongo-migrate"
+	mgo "go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-func handleParams() (string, error) {
-	if len(os.Args) < 2 {
-		return "", errors.New("Invalid query")
-	}
-	return os.Args[1], nil
-}
-
 func main() {
-	query, err := handleParams()
+	if len(os.Args) == 1 {
+		logrus.Fatal("Missing options: up or down")
+	}
+	option := os.Args[1]
+	// Set client options
+	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+	// Connect to MongoDB
+	client, err := mgo.Connect(context.TODO(), clientOptions)
 	if err != nil {
-		log.Fatal(err.Error())
+		panic(err)
 	}
-
-	session, err := mgo.Dial(config.MONGODB_HOST)
+	err = client.Ping(context.TODO(), nil)
 	if err != nil {
-		log.Fatal(err.Error())
+		logrus.Info(err.Error())
 	}
-	defer session.Close()
+	err = nil
+	migrate.SetDatabase(client.Database("main"))
+	migrate.SetMigrationsCollection("migrations")
 
-	mPool := mgosession.NewPool(nil, session, config.MONGODB_CONNECTION_POOL)
-	defer mPool.Close()
+	switch option {
+	case "new":
+		if len(os.Args) != 3 {
+			fmt.Println(len(os.Args))
+			logrus.Fatal("Should be: new <description of migration>")
+		}
+		fName := fmt.Sprintf("../migrations/%s_%s.go", time.Now().Format("200601021504"), os.Args[2])
+		from, err := os.Open("../migrations/template.go")
+		if err != nil {
+			logrus.Fatal("Should be: new <description of migration>")
+		}
+		defer from.Close()
+		to, err := os.OpenFile(fName, os.O_RDWR|os.O_CREATE, 0666)
+		if err != nil {
+			logrus.Fatal(err.Error())
+		}
 
-	bookmarkRepo := bookmark.NewMongoRepository(mPool, config.MONGODB_DATABASE)
-	bookmarkService := bookmark.NewService(bookmarkRepo)
-	all, err := bookmarkService.Search(query)
+		defer to.Close()
+
+		_, err = io.Copy(to, from)
+		if err != nil {
+			logrus.Fatal(err.Error())
+		}
+		logrus.WithFields(logrus.Fields{
+			"file": fName,
+		}).Info("New migration created")
+	case "up":
+		err = migrate.Up(migrate.AllAvailable)
+
+	case "down":
+		err = migrate.Down(migrate.AllAvailable)
+
+	}
 	if err != nil {
-		log.Fatal(err)
-	}
-	if len(all) == 0 {
-		log.Fatal(entity.ErrNotFound.Error())
-	}
-	for _, j := range all {
-		fmt.Printf("%s %s %v \n", j.Name, j.Link, j.Tags)
+		logrus.Fatal(err.Error())
 	}
 }
